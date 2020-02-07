@@ -18,6 +18,7 @@ use SAML2\XML\ds\KeyInfo;
 use SAML2\XML\ds\X509Certificate;
 use SAML2\XML\ds\X509Data;
 use SAML2\XML\saml\Issuer;
+use SAML2\XML\saml\NameID;
 use SimpleSAML\Configuration;
 use SimpleSAML\Error as SSP_Error;
 use SimpleSAML\Logger;
@@ -621,6 +622,10 @@ class Message
         // validate Response-element destination
         $currentURL = Utils\HTTP::getSelfURLNoQuery();
         $msgDestination = $response->getDestination();
+        if ($msgDestination === NULL) {
+            throw new \Exception('Destination attribute missing on SAML message');
+        }
+
         if ($msgDestination !== null && $msgDestination !== $currentURL) {
             throw new \Exception('Destination in response doesn\'t match the current URL. Destination is "' .
                 $msgDestination . '", current URL is "' . $currentURL . '".');
@@ -675,12 +680,47 @@ class Message
         self::decryptAttributes($idpMetadata, $spMetadata, $assertion);
 
         if (!self::checkSign($idpMetadata, $assertion)) {
-            if (!$responseSigned) {
-                throw new SSP_Error\Exception('Neither the assertion nor the response was signed.');
+            if (!$responseSigned || $spMetadata->getValue('WantAssertionsSigned')) {
+                throw new SSP_Error\Exception('The assertion and/or the response was not signed.');
             }
-        } // at least one valid signature found
+        }
+
+        if ($spMetadata->getValue('AuthnContextClassRefIsSPIDLevel')) {
+            if (!self::checkSPIDLevel($spMetadata->getValue('AuthnContextClassRef')[0], $assertion->getAuthnContextClassRef())) {
+                throw new SSP_Error\Exception('SPID level provided by the response is too low.');
+            }
+        }
 
         $currentURL = Utils\HTTP::getSelfURLNoQuery();
+
+        $issueInstant = $assertion->getIssueInstant();
+        if($issueInstant !== null && $issueInstant <= time() - 60) {
+            throw new SSP_Error\Exception(
+                'Received an assertion that has expired. Check clock synchronization on IdP and SP.'
+            );
+        }
+
+        if($issueInstant !== null && $issueInstant > time() + 60) {
+            throw new SSP_Error\Exception(
+                'Received an assertion that is valid in the future. Check clock synchronization on IdP and SP.'
+            );
+        }
+
+        $issuer = $assertion->getIssuer();
+        if($issuer === NULL || $issuer->getValue() === '') {
+            throw new SSP_Error\Exception(
+                'The assertion does not contain the issuer'
+            );
+        }
+        self::checkIssuer($issuer, $idpMetadata);
+
+        self::checkConditions($assertion);
+        self::checkAttributes($assertion->getAttributes(), $spMetadata->getValue('attributes'));
+
+        if (empty($assertion->getNameId())) {
+            throw new SSP_Error\Exception('<saml:NameID> missing or not specified in assertion.');
+        }
+        self::checkNameId($assertion->getNameId());
 
         // check various properties of the assertion
         $config = Configuration::getInstance();
@@ -711,6 +751,7 @@ class Message
                 'Received an assertion with a session that has expired. Check clock synchronization on IdP and SP.'
             );
         }
+
         $validAudiences = $assertion->getValidAudiences();
         if ($validAudiences !== null) {
             $spEntityId = $spMetadata->getString('entityid');
@@ -825,18 +866,32 @@ class Message
                 $lastError = 'NotBefore in SubjectConfirmationData is in the future: ' . $notBefore;
                 continue;
             }
+
             $notOnOrAfter = $scd->getNotOnOrAfter();
+            if ($notOnOrAfter === NULL) {
+                throw new SSP_Error\Exception('NotOnOrAfter attribute not specified on SAML message in <saml:SubjectConfirmationData>.');
+            }
+
             if (is_int($notOnOrAfter) && $notOnOrAfter <= time() - 60) {
                 $lastError = 'NotOnOrAfter in SubjectConfirmationData is in the past: ' . $notOnOrAfter;
                 continue;
             }
+
             $recipient = $scd->getRecipient();
+            if ($recipient === NULL) {
+                throw new SSP_Error\Exception('Recipient attribute not specified on SAML message in <saml:SubjectConfirmationData>.');
+            }
+
             if ($recipient !== null && $recipient !== $currentURL) {
                 $lastError = 'Recipient in SubjectConfirmationData does not match the current URL. Recipient is ' .
                     var_export($recipient, true) . ', current URL is ' . var_export($currentURL, true) . '.';
                 continue;
             }
             $inResponseTo = $scd->getInResponseTo();
+            if ($inResponseTo === NULL) {
+                throw new SSP_Error\Exception('InResponseTo attribute not specified on SAML message in <saml:SubjectConfirmationData>.');
+            }
+
             if (
                 $inResponseTo !== null
                 && $response->getInResponseTo() !== null
@@ -912,6 +967,7 @@ class Message
      */
     public static function getEncryptionKey(Configuration $metadata)
     {
+
         $sharedKey = $metadata->getString('sharedkey', null);
         if ($sharedKey !== null) {
             $key = new XMLSecurityKey(XMLSecurityKey::AES128_CBC);
@@ -934,5 +990,122 @@ class Message
 
         throw new SSP_Error\Exception('No supported encryption key in ' .
             var_export($metadata->getString('entityid'), true));
+    }
+
+    /**
+     * This static function validates the given SPID level with the required one.
+     * The given SPID level is validated if it is equal to or greater than that required.
+     *
+     * @param string $authnContextClassRefRequired The AuthnContextClassRef required.
+     * @param string $authnContextClassRefGiven The AuthnContextClassRef given.
+     *
+     * @return boolean True if this session ID is valid, false otherwise.
+     */
+    public static function checkSPIDLevel(string $authnContextClassRefRequired, string $authnContextClassRefGiven): bool
+    {
+        $levelRequired = (int) substr($authnContextClassRefRequired, -1);
+        $levelGiven = (int) substr($authnContextClassRefGiven, -1);
+        if ($levelGiven < $levelRequired) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * This static function validates the Issuer.
+     *
+     * @param \SAML2\XML\saml\Issuer $issuer The issuer of the assertion.
+     * @param \SimpleSAML\Configuration $idpMetadata The metadata of the identity provider.
+     */
+    public static function checkIssuer(Issuer $issuer, Configuration $idpMetadata): void
+    {
+        if ($issuer->getValue() !== $idpMetadata->getValue('entityid')) {
+            throw new SSP_Error\Exception(
+                'The value of <saml:Issuer> is different from IdP entityid'
+            );
+        }
+
+        if (empty($issuer->getFormat())) {
+            throw new SSP_Error\Exception(
+                'The Format attributes of <saml:Issuer> is empty'
+            );
+        }
+
+        if ($issuer->getFormat() !== Constants::NAMEID_ENTITY) {
+            throw new SSP_Error\Exception(
+                'The Format attributes of <saml:Issuer> is different from the exptected one'
+            );
+        }
+    }
+
+    /**
+     * This static function validates the Conditions.
+     *
+     * @param SAML2\Assertion $assertion The assertion.
+     */
+    public static function checkConditions(Assertion $assertion): void
+    {
+        if ($assertion->getValidAudiences() === NULL) {
+            throw new SSP_Error\Exception(
+                'The value of <saml:Conditions> is empty'
+            );
+        }
+
+        if ($assertion->getNotBefore() === NULL) {
+            throw new SSP_Error\Exception(
+                'The NotBefore attribute of <saml:Conditions> is empty'
+            );
+        }
+
+        if ($assertion->getNotOnOrAfter() === NULL) {
+            throw new SSP_Error\Exception(
+                'The NotOnOrAfter attribute of <saml:Conditions> is empty'
+            );
+        }
+    }
+
+    /**
+     * This static function validates the Conditions.
+     *
+     * @param array $attributesGiven The attributes.
+     * @param array $attributesRequired The attributes.
+     */
+    public static function checkAttributes(array $attributesGiven, array $attributesRequired): void
+    {
+        if ($attributesGiven === []) {
+            throw new SSP_Error\Exception(
+                'The <saml:AttributeStatement> is empty'
+            );
+        }
+
+        if (count($attributesGiven) !== count($attributesRequired)) {
+            throw new SSP_Error\Exception(
+                'The <saml:AttributeStatement> does not contain the same number of <saml:Attribute> required.'
+            );
+        }
+
+        foreach ($attributesRequired as $key => $attributeRequired) {
+            if (!array_key_exists($attributeRequired, $attributesGiven)) {
+                throw new SSP_Error\Exception(
+                    "The <saml:AttributeStatement> does not contain the <saml:Attribute> with name $attributeRequired"
+                );
+            }
+        }
+    }
+
+    /**
+     * This static function validates the NameID.
+     *
+     * @param NameID $nameId The NameID.
+     */
+    public static function checkNameId(NameID $nameId): void
+    {
+        if (empty($nameId->getFormat())) {
+            throw new SSP_Error\Exception('The Format attribute missing or not specified in <saml:NameID>.');
+        }
+
+        if ($nameId->getFormat() !== Constants::NAMEID_TRANSIENT) {
+            throw new SSP_Error\Exception('The Format is different from the expected one in <saml:NameID>.');
+        }
     }
 }

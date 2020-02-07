@@ -96,8 +96,11 @@ if (!empty($stateId)) {
         $state = \SimpleSAML\Auth\State::loadState($stateId, 'saml:sp:sso');
     } catch (Exception $e) {
         // something went wrong,
-        SimpleSAML\Logger::warning('Could not load state specified by InResponseTo: ' . $e->getMessage() .
-            ' Processing response as unsolicited.');
+        $message = 'Could not load state specified by InResponseTo: ' . $e->getMessage();
+        if ($spMetadata->getValue('NoUnsolicitedResponse')) {
+            throw new \SimpleSAML\Error\Exception($message);
+        }
+        SimpleSAML\Logger::warning($message . ' Processing response as unsolicited.');
     }
 }
 

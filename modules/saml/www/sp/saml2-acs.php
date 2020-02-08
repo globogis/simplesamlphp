@@ -37,7 +37,6 @@ if (!($response instanceof \SAML2\Response)) {
     throw new \SimpleSAML\Error\BadRequest('Invalid message received to AssertionConsumerService endpoint.');
 }
 
-/** @psalm-var null|string|\SAML2\XML\saml\Issuer $issuer   Remove in SSP 2.0 */
 $issuer = $response->getIssuer();
 if ($issuer === null) {
     // no Issuer in the response. Look for an unencrypted assertion with an issuer
@@ -48,7 +47,6 @@ if ($issuer === null) {
             break;
         }
     }
-    /** @psalm-var string|null $issuer  Remove in SSP 2.0 */
     if ($issuer === null) {
         // no issuer found in the assertions
         throw new Exception('Missing <saml:Issuer> in message delivered to AssertionConsumerService.');
@@ -56,7 +54,6 @@ if ($issuer === null) {
 }
 
 if ($issuer instanceof \SAML2\XML\saml\Issuer) {
-    /** @psalm-var string|null $issuer */
     $issuer = $issuer->getValue();
     if ($issuer === null) {
         // no issuer found in the assertions
@@ -66,7 +63,6 @@ if ($issuer instanceof \SAML2\XML\saml\Issuer) {
 
 $session = \SimpleSAML\Session::getSessionFromRequest();
 $prevAuth = $session->getAuthData($sourceId, 'saml:sp:prevAuth');
-/** @psalm-var string $issuer */
 if ($prevAuth !== null && $prevAuth['id'] === $response->getId() && $prevAuth['issuer'] === $issuer) {
     /* OK, it looks like this message has the same issuer
      * and ID as the SP session we already have active. We
@@ -96,11 +92,9 @@ if (!empty($stateId)) {
         $state = \SimpleSAML\Auth\State::loadState($stateId, 'saml:sp:sso');
     } catch (Exception $e) {
         // something went wrong,
-        $message = 'Could not load state specified by InResponseTo: ' . $e->getMessage();
-        if ($spMetadata->getValue('NoUnsolicitedResponse')) {
-            throw new \SimpleSAML\Error\Exception($message);
-        }
-        SimpleSAML\Logger::warning($message . ' Processing response as unsolicited.');
+        SimpleSAML\Logger::warning('Could not load state specified by InResponseTo: ' . $e->getMessage()
+            . ' Processing response as unsolicited.'
+        );
     }
 }
 
@@ -124,6 +118,8 @@ if ($state) {
             );
         }
     }
+/*} elseif ($spMetadata->getValue('NoUnsolicitedResponse')) {
+    throw new \SimpleSAML\Error\Exception('Could not load state specified by InResponseTo');*/
 } else {
     // this is an unsolicited response
     $state = [

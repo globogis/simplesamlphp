@@ -1,7 +1,5 @@
 <?php
 
-declare(strict_types=1);
-
 namespace SimpleSAML\Module\saml;
 
 use RobRichards\XMLSecLibs\XMLSecurityKey;
@@ -136,7 +134,7 @@ class Message
      *
      * @throws \SimpleSAML\Error\Exception if we cannot find the certificate matching the fingerprint.
      */
-    private static function findCertificate(array $certFingerprints, array $certificates): string
+    private static function findCertificate(array $certFingerprints, array $certificates)
     {
         $candidates = [];
 
@@ -384,7 +382,7 @@ class Message
         Configuration $srcMetadata,
         Configuration $dstMetadata,
         $assertion
-    ): Assertion {
+    ) {
         assert($assertion instanceof Assertion || $assertion instanceof EncryptedAssertion);
 
         if ($assertion instanceof Assertion) {
@@ -633,6 +631,18 @@ class Message
 
         $responseSigned = self::checkSign($idpMetadata, $response);
 
+        if (empty($response->getId())) {
+            throw new SSP_Error\Exception('Response with out ID.');
+        }
+
+        $issuer = $response->getIssuer();
+        if($issuer === NULL || $issuer->getValue() === '') {
+            throw new SSP_Error\Exception(
+                'The response does not contain the issuer'
+            );
+        }
+        self::checkIssuer($issuer, $idpMetadata);
+
         /*
          * When we get this far, the response itself is valid.
          * We only need to check signatures and conditions of the response.
@@ -672,9 +682,10 @@ class Message
         Configuration $idpMetadata,
         Response $response,
         $assertion,
-        bool $responseSigned
-    ): Assertion {
+        $responseSigned
+    ) {
         assert($assertion instanceof Assertion || $assertion instanceof EncryptedAssertion);
+        assert(is_bool($responseSigned));
 
         $assertion = self::decryptAssertion($idpMetadata, $spMetadata, $assertion);
         self::decryptAttributes($idpMetadata, $spMetadata, $assertion);
@@ -683,6 +694,12 @@ class Message
             if (!$responseSigned || $spMetadata->getValue('WantAssertionsSigned')) {
                 throw new SSP_Error\Exception('The assertion and/or the response was not signed.');
             }
+        }
+
+        if ($assertion->getAuthnInstant() === null) {
+            throw new SSP_Error\Exception(
+                'No AuthnStatement found in assertion.'
+            );
         }
 
         if ($spMetadata->getValue('AuthnContextClassRefIsSPIDLevel')) {
@@ -1100,6 +1117,11 @@ class Message
      */
     public static function checkNameId(NameID $nameId): void
     {
+
+        if (empty($nameId->getValue())) {
+            throw new SSP_Error\Exception('The value in <saml:NameID> is missing.');
+        }
+
         if (empty($nameId->getFormat())) {
             throw new SSP_Error\Exception('The Format attribute missing or not specified in <saml:NameID>.');
         }
@@ -1107,5 +1129,10 @@ class Message
         if ($nameId->getFormat() !== Constants::NAMEID_TRANSIENT) {
             throw new SSP_Error\Exception('The Format is different from the expected one in <saml:NameID>.');
         }
+
+        if (empty($nameId->getNameQualifier())) {
+            throw new SSP_Error\Exception('The NameQualifier attribute missing or not specified in <saml:NameID>.');
+        }
+
     }
 }
